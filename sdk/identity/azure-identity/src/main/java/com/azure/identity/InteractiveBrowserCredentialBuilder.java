@@ -16,10 +16,11 @@ import java.util.HashMap;
  * @see InteractiveBrowserCredential
  */
 public class InteractiveBrowserCredentialBuilder extends AadCredentialBuilderBase<InteractiveBrowserCredentialBuilder> {
+    private final String clientId = IdentityConstants.DEVELOPER_SINGLE_SIGN_ON_ID;
+
     private Integer port;
     private boolean automaticAuthentication = true;
     private String redirectUrl;
-    String clientId = IdentityConstants.DEVELOPER_SINGLE_SIGN_ON_ID;
 
     /**
      * Sets the port for the local HTTP server, for which {@code http://localhost:{port}} must be
@@ -110,7 +111,7 @@ public class InteractiveBrowserCredentialBuilder extends AadCredentialBuilderBas
      */
     public InteractiveBrowserCredential build() {
         ValidationUtil.validateInteractiveBrowserRedirectUrlSetup(getClass().getSimpleName(), port, redirectUrl);
-        ValidationUtil.validate(getClass().getSimpleName(), new HashMap<String, Object>() {{
+        ValidationUtil.validate(getClass().getSimpleName(), new HashMap<>() {{
                 put("clientId", clientId);
             }});
         return new InteractiveBrowserCredential(clientId, tenantId, port, redirectUrl, automaticAuthentication,
