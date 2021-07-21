@@ -4,12 +4,10 @@
 package com.azure.spring.integration.servicebus.factory;
 
 
+import com.azure.core.amqp.AmqpRetryOptions;
 import com.azure.core.amqp.AmqpTransportType;
-import com.azure.messaging.servicebus.ServiceBusClientBuilder;
-import com.azure.messaging.servicebus.ServiceBusErrorContext;
-import com.azure.messaging.servicebus.ServiceBusProcessorClient;
-import com.azure.messaging.servicebus.ServiceBusReceivedMessageContext;
-import com.azure.messaging.servicebus.ServiceBusSenderAsyncClient;
+import com.azure.messaging.servicebus.*;
+import com.azure.messaging.servicebus.implementation.ServiceBusConstants;
 import com.azure.messaging.servicebus.models.ServiceBusReceiveMode;
 import com.azure.spring.integration.servicebus.ServiceBusClientConfig;
 import com.azure.spring.integration.servicebus.ServiceBusMessageProcessor;
@@ -26,6 +24,7 @@ public class DefaultServiceBusQueueClientFactory extends AbstractServiceBusSende
     implements ServiceBusQueueClientFactory {
 
     private final Map<String, ServiceBusProcessorClient> processorClientMap = new ConcurrentHashMap<>();
+    private final Map<String, ServiceBusReceiverAsyncClient> clientMap = new ConcurrentHashMap<>();
     private final Map<String, ServiceBusSenderAsyncClient> senderClientMap = new ConcurrentHashMap<>();
 
     // TODO (xiada) whether will this reuse the underlying connection?
@@ -48,6 +47,15 @@ public class DefaultServiceBusQueueClientFactory extends AbstractServiceBusSende
         ServiceBusMessageProcessor<ServiceBusReceivedMessageContext, ServiceBusErrorContext> messageProcessor) {
         return this.processorClientMap.computeIfAbsent(name,
                                                        n -> createProcessorClient(n, clientConfig, messageProcessor));
+    }
+
+
+    @Override
+    public ServiceBusReceiverAsyncClient getOrCreateClient(
+        String name,
+        ServiceBusClientConfig clientConfig) {
+        return this.clientMap.computeIfAbsent(name,
+            n -> createAsyncClient(n, clientConfig));
     }
 
     @Override
@@ -89,5 +97,19 @@ public class DefaultServiceBusQueueClientFactory extends AbstractServiceBusSende
 
     private ServiceBusSenderAsyncClient createQueueSender(String name) {
         return serviceBusClientBuilder.sender().queueName(name).buildAsyncClient();
+    }
+
+
+    private ServiceBusReceiverAsyncClient createAsyncClient( String name,
+                                                             ServiceBusClientConfig clientConfig){
+        return serviceBusClientBuilder.retryOptions(new AmqpRetryOptions().setTryTimeout(ServiceBusConstants.OPERATION_TIMEOUT))
+                                      .receiver()
+                                      .disableAutoComplete()
+                                      .queueName(name)
+                                      .receiveMode(ServiceBusReceiveMode.PEEK_LOCK)
+                                      .prefetchCount(clientConfig.getPrefetchCount())
+                                      .buildAsyncClient();
+
+
     }
 }

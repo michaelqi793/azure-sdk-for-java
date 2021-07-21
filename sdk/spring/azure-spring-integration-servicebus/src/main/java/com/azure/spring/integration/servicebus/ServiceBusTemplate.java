@@ -3,6 +3,9 @@
 
 package com.azure.spring.integration.servicebus;
 
+import com.azure.core.amqp.implementation.TracerProvider;
+import com.azure.core.util.logging.ClientLogger;
+import com.azure.core.util.tracing.Tracer;
 import com.azure.messaging.servicebus.ServiceBusMessage;
 import com.azure.spring.integration.core.api.CheckpointConfig;
 import com.azure.spring.integration.core.api.CheckpointMode;
@@ -17,6 +20,7 @@ import org.springframework.messaging.Message;
 import org.springframework.util.Assert;
 import org.springframework.util.StringUtils;
 
+import java.util.ServiceLoader;
 import java.util.concurrent.CompletableFuture;
 
 import static com.azure.spring.integration.core.api.CheckpointMode.MANUAL;
@@ -37,6 +41,8 @@ public class ServiceBusTemplate<T extends ServiceBusSenderFactory> implements Se
     protected CheckpointConfig checkpointConfig = CHECKPOINT_RECORD;
     protected ServiceBusClientConfig clientConfig = ServiceBusClientConfig.builder().build();
     protected ServiceBusMessageConverter messageConverter;
+    protected final TracerProvider tracerProvider = new TracerProvider(ServiceLoader.load(Tracer.class));
+
 
     public ServiceBusTemplate(@NonNull T senderFactory) {
         this(senderFactory, DEFAULT_CONVERTER);

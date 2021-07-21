@@ -5,7 +5,6 @@ package com.azure.spring.integration.servicebus;
 
 
 import com.azure.messaging.servicebus.ServiceBusErrorContext;
-import com.azure.messaging.servicebus.ServiceBusReceivedMessageContext;
 import com.azure.spring.integration.core.AzureCheckpointer;
 import com.azure.spring.integration.core.AzureHeaders;
 import com.azure.spring.integration.core.api.CheckpointConfig;
@@ -68,10 +67,6 @@ public class DefaultServiceBusMessageProcessor
             Message<?> message = messageConverter.toMessage(context.getMessage(), new MessageHeaders(headers),
                                                             payloadType);
             consumer.accept(message);
-
-            if (this.checkpointConfig.getCheckpointMode() == CheckpointMode.RECORD) {
-                checkpointer.success().whenComplete((v, t) -> checkpointHandler(message, t));
-            }
         };
     }
 

@@ -3,8 +3,13 @@
 
 package com.azure.spring.integration.servicebus.queue;
 
-import com.azure.messaging.servicebus.ServiceBusProcessorClient;
-import com.azure.messaging.servicebus.ServiceBusReceivedMessageContext;
+import com.azure.core.util.Context;
+import com.azure.core.util.logging.ClientLogger;
+import com.azure.core.util.tracing.ProcessKind;
+import com.azure.messaging.servicebus.ServiceBusReceivedMessage;
+import com.azure.spring.integration.core.api.CheckpointMode;
+import com.azure.spring.integration.servicebus.ServiceBusReceivedMessageContext;
+import com.azure.messaging.servicebus.ServiceBusReceiverAsyncClient;
 import com.azure.spring.integration.servicebus.DefaultServiceBusMessageProcessor;
 import com.azure.spring.integration.servicebus.ServiceBusClientConfig;
 import com.azure.spring.integration.servicebus.ServiceBusRuntimeException;
@@ -13,14 +18,23 @@ import com.azure.spring.integration.servicebus.converter.ServiceBusMessageConver
 import com.azure.spring.integration.servicebus.converter.ServiceBusMessageHeaders;
 import com.azure.spring.integration.servicebus.factory.ServiceBusQueueClientFactory;
 import com.google.common.collect.Sets;
+import org.reactivestreams.Subscription;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.lang.NonNull;
 import org.springframework.messaging.Message;
 import org.springframework.util.Assert;
+import reactor.core.CoreSubscriber;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Signal;
+import reactor.core.scheduler.Schedulers;
 
-import java.util.Set;
+import java.util.*;
 import java.util.function.Consumer;
+
+import static com.azure.core.util.tracing.Tracer.*;
+import static com.azure.messaging.servicebus.implementation.ServiceBusConstants.AZ_TRACING_NAMESPACE_VALUE;
+import static com.azure.messaging.servicebus.implementation.ServiceBusConstants.AZ_TRACING_SERVICE_NAME;
 
 /**
  * Default implementation of {@link ServiceBusQueueOperation}.
@@ -35,6 +49,8 @@ public class ServiceBusQueueTemplate extends ServiceBusTemplate<ServiceBusQueueC
     private static final String MSG_SUCCESS_CHECKPOINT = "Checkpointed %s in queue '%s' in %s mode";
 
     private final Set<String> subscribedQueues = Sets.newConcurrentHashSet();
+
+    private final ClientLogger logger = new ClientLogger(ServiceBusQueueTemplate.class);
 
     public ServiceBusQueueTemplate(ServiceBusQueueClientFactory clientFactory) {
         super(clientFactory);
@@ -68,10 +84,113 @@ public class ServiceBusQueueTemplate extends ServiceBusTemplate<ServiceBusQueueC
                 return String.format(MSG_SUCCESS_CHECKPOINT, message, name, getCheckpointConfig().getCheckpointMode());
             }
         };
+        Consumer<ServiceBusReceivedMessageContext> serviceBusMessageConsumer = messageProcessor.processMessage();
+        ServiceBusReceiverAsyncClient asyncReceiverClient = this.clientFactory.getOrCreateClient(name, clientConfig);
+        Flux<ServiceBusReceivedMessageContext> fluxMessages = asyncReceiverClient.receiveMessages().map(x -> new ServiceBusReceivedMessageContext(x, asyncReceiverClient));
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        CoreSubscriber<ServiceBusReceivedMessageContext>[] subscribers = new CoreSubscriber[clientConfig.getConcurrency()];
 
-        ServiceBusProcessorClient processorClient = this.clientFactory.getOrCreateProcessor(name, clientConfig,
-                                                                                            messageProcessor);
-        processorClient.start();
+        for (int i = 0; i < clientConfig.getConcurrency(); i++) {
+            subscribers[i] = new CoreSubscriber<ServiceBusReceivedMessageContext>() {
+                private Subscription subscription = null;
+
+                @Override
+                public void onSubscribe(Subscription subscription) {
+                    this.subscription = subscription;
+                    subscription.request(1);
+                }
+
+                @Override
+                public void onNext(ServiceBusReceivedMessageContext serviceBusReceivedMessageContext) {
+
+                        Context processSpanContext = null;
+                        try {
+                            processSpanContext =
+                                startProcessTracingSpan(serviceBusReceivedMessageContext.getMessage(),
+                                    serviceBusReceivedMessageContext.getEntityPath(), serviceBusReceivedMessageContext.getFullyQualifiedNamespace());
+                            serviceBusMessageConsumer.accept(serviceBusReceivedMessageContext);
+                            if (checkpointConfig.getCheckpointMode() == CheckpointMode.RECORD) {
+                                serviceBusReceivedMessageContext.complete();
+                            }
+                            endProcessTracingSpan(processSpanContext, Signal.complete());
+                        } catch (Exception ex) {
+                            endProcessTracingSpan(processSpanContext, Signal.error(ex));
+                            if (checkpointConfig.getCheckpointMode() == CheckpointMode.RECORD) {
+                                logger.warning("Error when processing message. Abandoning message.", ex);
+                                serviceBusReceivedMessageContext.abandon();
+                            }
+                        }
+                    logger.verbose("Requesting 1 more message from upstream");
+                    subscription.request(1);
+                    }
+
+
+                @Override
+                public void onError(Throwable throwable) {
+                    logger.info("Error receiving messages.", throwable);
+
+                }
+
+                @Override
+                public void onComplete() {
+                    logger.info("Completed receiving messages.");
+                }
+            };
+        }
+       /*  fluxMessages.parallel(clientConfig.getConcurrency(), 1)
+            .runOn(Schedulers.boundedElastic(), 1)
+            .subscribe(subscribers);
+*/
+        fluxMessages.subscribe(subscribers[0]);
+
+    }
+
+    private Context startProcessTracingSpan(ServiceBusReceivedMessage receivedMessage, String entityPath,
+                                            String fullyQualifiedNamespace) {
+
+        Object diagnosticId = receivedMessage.getApplicationProperties().get(DIAGNOSTIC_ID_KEY);
+        if (diagnosticId == null || !tracerProvider.isEnabled()) {
+            return Context.NONE;
+        }
+
+        Context spanContext = tracerProvider.extractContext(diagnosticId.toString(), Context.NONE);
+
+        spanContext = spanContext
+            .addData(ENTITY_PATH_KEY, entityPath)
+            .addData(HOST_NAME_KEY, fullyQualifiedNamespace)
+            .addData(AZ_TRACING_NAMESPACE_KEY, AZ_TRACING_NAMESPACE_VALUE);
+        spanContext = receivedMessage.getEnqueuedTime() == null
+            ? spanContext
+            : spanContext.addData(MESSAGE_ENQUEUED_TIME,
+            receivedMessage.getEnqueuedTime().toInstant().getEpochSecond());
+
+        return tracerProvider.startSpan(AZ_TRACING_SERVICE_NAME, spanContext, ProcessKind.PROCESS);
+    }
+
+    private void endProcessTracingSpan(Context processSpanContext, Signal<Void> signal) {
+        if (processSpanContext == null) {
+            return;
+        }
+
+        Optional<Object> spanScope = processSpanContext.getData(SCOPE_KEY);
+        // Disposes of the scope when the trace span closes.
+        if (!spanScope.isPresent() || !tracerProvider.isEnabled()) {
+            return;
+        }
+        if (spanScope.get() instanceof AutoCloseable) {
+            AutoCloseable close = (AutoCloseable) processSpanContext.getData(SCOPE_KEY).get();
+            try {
+                close.close();
+            } catch (Exception exception) {
+                logger.error("endTracingSpan().close() failed with an error %s", exception);
+            }
+
+        } else {
+            logger.warning(String.format(Locale.US,
+                "Process span scope type is not of type AutoCloseable, but type: %s. Not closing the scope"
+                    + " and span", spanScope.get() != null ? spanScope.getClass() : "null"));
+        }
+        tracerProvider.endSpan(processSpanContext, signal);
     }
 
     @Override

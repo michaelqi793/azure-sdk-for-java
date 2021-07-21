@@ -107,10 +107,10 @@ public class ServiceBusTopicTemplate extends ServiceBusTemplate<ServiceBusTopicC
                                      getCheckpointConfig().getCheckpointMode());
             }
         };
-        ServiceBusProcessorClient processorClient = this.clientFactory.getOrCreateProcessor(name, consumerGroup,
+      /*  ServiceBusProcessorClient processorClient = this.clientFactory.getOrCreateProcessor(name, consumerGroup,
                                                                                             this.clientConfig,
                                                                                             messageProcessor);
-        processorClient.start();
+        processorClient.start();*/
     }
 
 
